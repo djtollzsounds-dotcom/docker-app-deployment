@@ -8,14 +8,14 @@ on:
 jobs:
 
   # ==========================================
-  # JOB 1 - BUILD
+  # JOB 1: BUILD
   # ==========================================
   build:
     name: Build Docker Image on EC2
     runs-on: ubuntu-latest
 
     steps:
-      - name: Build Docker image on EC2
+      - name: Build Docker image
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -26,10 +26,13 @@ jobs:
             set -e
 
             echo "======================================"
-            echo "BUILD JOB"
+            echo "BUILDING DOCKER IMAGE"
             echo "======================================"
 
-            cd /home/ec2-user/myapp
+            cd /home/ec2-user
+
+            echo "Current directory:"
+            pwd
 
             echo "Pulling latest code..."
 
@@ -38,17 +41,17 @@ jobs:
 
             echo "Building Docker image..."
 
-            docker build \
-              -t myapp:latest \
-              .
+            docker build -t myapp:latest .
 
-            echo "Docker image built successfully"
+            echo "======================================"
+            echo "BUILD COMPLETED"
+            echo "======================================"
 
-            docker images myapp
+            docker images myapp:latest
 
 
   # ==========================================
-  # JOB 2 - DEPLOY
+  # JOB 2: DEPLOY
   # ==========================================
   deploy:
     name: Deploy Docker Container
@@ -57,7 +60,7 @@ jobs:
     needs: build
 
     steps:
-      - name: Deploy to EC2
+      - name: Deploy Docker container
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -68,8 +71,10 @@ jobs:
             set -e
 
             echo "======================================"
-            echo "DEPLOY JOB"
+            echo "DEPLOYING DOCKER CONTAINER"
             echo "======================================"
+
+            cd /home/ec2-user
 
             echo "Stopping existing container..."
 
@@ -84,15 +89,19 @@ jobs:
               -p 80:80 \
               myapp:latest
 
-            echo "Waiting for container..."
+            echo "Waiting for application..."
 
             sleep 5
 
-            echo "Container status:"
+            echo "======================================"
+            echo "CONTAINER STATUS"
+            echo "======================================"
 
             docker ps
 
-            echo "Container logs:"
+            echo "======================================"
+            echo "CONTAINER LOGS"
+            echo "======================================"
 
             docker logs myapp --tail 50
 
