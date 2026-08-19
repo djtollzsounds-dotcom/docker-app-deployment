@@ -10,29 +10,104 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.2
+        uses: appleboy/ssh-action@v1.8.1
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+
           script: |
-            cd /home/ec2-user/myapp
+            set -e
 
-            git pull origin main
+            APP_DIR="/home/ec2-user/myapp"
+            CONTAINER_NAME="myapp"
+            IMAGE_NAME="myapp:latest"
 
-            docker stop myapp || true
-            docker rm myapp || true
+            echo "======================================"
+            echo "Starting deployment"
+            echo "======================================"
 
-            docker build -t myapp:latest .
+            # Check application directory
+            if [ ! -d "$APP_DIR" ]; then
+              echo "ERROR: Application directory does not exist:"
+              echo "$APP_DIR"
+              exit 1
+            fi
+
+            cd "$APP_DIR"
+
+            echo "Current directory:"
+            pwd
+
+            # Check Git repository
+            if [ ! -d ".git" ]; then
+              echo "ERROR: $APP_DIR is not a Git repository"
+              exit 1
+            fi
+
+            # Check Dockerfile
+            if [ ! -f "Dockerfile" ]; then
+              echo "ERROR: Dockerfile not found"
+              exit 1
+            fi
+
+            echo "======================================"
+            echo "Pulling latest code"
+            echo "======================================"
+
+            git fetch origin
+            git reset --hard origin/master
+
+            echo "======================================"
+            echo "Stopping existing container"
+            echo "======================================"
+
+            docker stop "$CONTAINER_NAME" || true
+            docker rm "$CONTAINER_NAME" || true
+
+            echo "======================================"
+            echo "Building Docker image"
+            echo "======================================"
+
+            docker build \
+              --no-cache \
+              -t "$IMAGE_NAME" .
+
+            echo "======================================"
+            echo "Starting Docker container"
+            echo "======================================"
 
             docker run -d \
-              --name myapp \
+              --name "$CONTAINER_NAME" \
               --restart unless-stopped \
               -p 80:80 \
-              myapp:latest
+              "$IMAGE_NAME"
+
+            echo "======================================"
+            echo "Waiting for container"
+            echo "======================================"
+
+            sleep 5
+
+            echo "======================================"
+            echo "Container status"
+            echo "======================================"
+
+            docker ps
+
+            echo "======================================"
+            echo "Container logs"
+            echo "======================================"
+
+            docker logs "$CONTAINER_NAME" --tail 50
+
+            echo "======================================"
+            echo "Cleaning unused Docker images"
+            echo "======================================"
 
             docker image prune -f
+
+            echo "======================================"
+            echo "DEPLOYMENT SUCCESSFUL"
+            echo "======================================"
