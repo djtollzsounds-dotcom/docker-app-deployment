@@ -5,62 +5,74 @@ on:
     branches:
       - master
 
+env:
+  AWS_REGION: eu-west-2
+  ECR_REPOSITORY: easy-banking
+
 jobs:
 
-  # ==========================================
-  # JOB 1: BUILD
-  # ==========================================
+  # ==================================================
+  # JOB 1: BUILD AND PUSH TO ECR
+  # ==================================================
   build:
-    name: Build Docker Image on EC2
+    name: Build Docker Image
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+
     steps:
-      - name: Build Docker image
-        uses: appleboy/ssh-action@v1.2.2
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-          script: |
-            set -e
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-            echo "======================================"
-            echo "BUILDING DOCKER IMAGE"
-            echo "======================================"
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
+            .
 
-            cd /home/ec2-user
+      - name: Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
-            echo "Current directory:"
-            pwd
-
-            echo "Pulling latest code..."
-
-            git fetch origin
-            git reset --hard origin/master
-
-            echo "Building Docker image..."
-
-            docker build -t myapp:latest .
-
-            echo "======================================"
-            echo "BUILD COMPLETED"
-            echo "======================================"
-
-            docker images myapp:latest
+      - name: Show image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          echo "Image pushed:"
+          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
 
 
-  # ==========================================
-  # JOB 2: DEPLOY
-  # ==========================================
+  # ==================================================
+  # JOB 2: DEPLOY TO EC2
+  # ==================================================
   deploy:
-    name: Deploy Docker Container
+    name: Deploy to EC2
     runs-on: ubuntu-latest
 
     needs: build
 
     steps:
-      - name: Deploy Docker container
+
+      - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -70,26 +82,42 @@ jobs:
           script: |
             set -e
 
+            AWS_REGION="eu-west-2"
+            ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-2.amazonaws.com"
+            ECR_REPOSITORY="myapp"
+            IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+            CONTAINER="myapp"
+
             echo "======================================"
-            echo "DEPLOYING DOCKER CONTAINER"
+            echo "DEPLOYING TO EC2"
             echo "======================================"
 
-            cd /home/ec2-user
+            echo "Logging into Amazon ECR..."
+
+            aws ecr get-login-password \
+              --region "$AWS_REGION" | \
+              docker login \
+              --username AWS \
+              --password-stdin "$ECR_REGISTRY"
+
+            echo "Pulling latest Docker image..."
+
+            docker pull "$IMAGE"
 
             echo "Stopping existing container..."
 
-            docker stop myapp || true
-            docker rm myapp || true
+            docker stop "$CONTAINER" || true
+            docker rm "$CONTAINER" || true
 
             echo "Starting new container..."
 
             docker run -d \
-              --name myapp \
+              --name "$CONTAINER" \
               --restart unless-stopped \
               -p 80:80 \
-              myapp:latest
+              "$IMAGE"
 
-            echo "Waiting for application..."
+            echo "Waiting for container..."
 
             sleep 5
 
@@ -103,7 +131,7 @@ jobs:
             echo "CONTAINER LOGS"
             echo "======================================"
 
-            docker logs myapp --tail 50
+            docker logs "$CONTAINER" --tail 50
 
             echo "======================================"
             echo "DEPLOYMENT SUCCESSFUL"
