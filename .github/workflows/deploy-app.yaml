@@ -1,29 +1,19 @@
-name: Build and Deploy Docker App
+name: Deploy to Production Environment
 
 on:
-  push:
-    branches:
-      - master
+  workflow_dispatch:
 
 env:
-  AWS_REGION: eu-west-2
-  ECR_REPOSITORY: easy-banking
+  APP_NAME: easy-bank
+  CONTAINER_NAME: easy-bank
 
 jobs:
-
-  # ==================================================
-  # JOB 1: BUILD AND PUSH TO ECR
-  # ==================================================
-  build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
+  deploy:
+    name: Build and Deploy to EC2
+    runs-on: self-hosted
 
     steps:
-
-      - name: Checkout source code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -31,108 +21,108 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker image
+      - name: Build, tag, and push image to Amazon ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker build \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
-            .
+          set -e
 
-      - name: Push Docker image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          echo "Building Docker image..."
 
-      - name: Show image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          echo "Image pushed:"
-          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          docker build -t ${{ secrets.ECR_REPOSITORY }} .
 
+          echo "Tagging Docker image..."
 
-  # ==================================================
-  # JOB 2: DEPLOY TO EC2
-  # ==================================================
-  deploy:
-    name: Deploy to EC2
-    runs-on: ubuntu-latest
+          docker tag ${{ secrets.ECR_REPOSITORY }} \
+            $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
 
-    needs: build
+          echo "Pushing Docker image to ECR..."
 
-    steps:
+          docker push \
+            $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+
+          echo "Docker image pushed successfully."
 
       - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -e
 
-          script: |
+          echo "Connecting to EC2..."
+
+          echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ec2_key
+          chmod 600 /tmp/ec2_key
+
+          trap 'rm -f /tmp/ec2_key' EXIT
+
+          ssh \
+            -o StrictHostKeyChecking=no \
+            -i /tmp/ec2_key \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+
             set -e
 
-            AWS_REGION="eu-west-2"
-            ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-2.amazonaws.com"
-            ECR_REPOSITORY="myapp"
-            IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-            CONTAINER="myapp"
-
             echo "======================================"
-            echo "DEPLOYING TO EC2"
+            echo "Logging into Amazon ECR"
             echo "======================================"
-
-            echo "Logging into Amazon ECR..."
 
             aws ecr get-login-password \
-              --region "$AWS_REGION" | \
+              --region ${{ secrets.AWS_REGION }} | \
               docker login \
               --username AWS \
-              --password-stdin "$ECR_REGISTRY"
-
-            echo "Pulling latest Docker image..."
-
-            docker pull "$IMAGE"
-
-            echo "Stopping existing container..."
-
-            docker stop "$CONTAINER" || true
-            docker rm "$CONTAINER" || true
-
-            echo "Starting new container..."
-
-            docker run -d \
-              --name "$CONTAINER" \
-              --restart unless-stopped \
-              -p 80:80 \
-              "$IMAGE"
-
-            echo "Waiting for container..."
-
-            sleep 5
+              --password-stdin $ECR_REGISTRY
 
             echo "======================================"
-            echo "CONTAINER STATUS"
+            echo "Pulling Docker image"
+            echo "======================================"
+
+            docker pull \
+              $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+
+            echo "======================================"
+            echo "Stopping existing container"
+            echo "======================================"
+
+            docker stop $CONTAINER_NAME || true
+            docker rm $CONTAINER_NAME || true
+
+            echo "======================================"
+            echo "Starting new container"
+            echo "======================================"
+
+            docker run -d \
+              --name $CONTAINER_NAME \
+              --restart unless-stopped \
+              -p 80:3000 \
+              $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+
+            echo "======================================"
+            echo "Container status"
             echo "======================================"
 
             docker ps
 
             echo "======================================"
-            echo "CONTAINER LOGS"
+            echo "Container logs"
             echo "======================================"
 
-            docker logs "$CONTAINER" --tail 50
+            docker logs $CONTAINER_NAME --tail 50
+
+            echo "======================================"
+            echo "Cleaning old images"
+            echo "======================================"
+
+            docker image prune -f
 
             echo "======================================"
             echo "DEPLOYMENT SUCCESSFUL"
             echo "======================================"
+
+          EOF
