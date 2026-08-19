@@ -10,7 +10,7 @@ env:
 jobs:
   deploy:
     name: Build and Deploy to EC2
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
