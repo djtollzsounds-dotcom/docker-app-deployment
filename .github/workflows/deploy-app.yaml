@@ -13,9 +13,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # ==========================================
+      # AWS CREDENTIALS
+      # ==========================================
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -23,103 +31,264 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+
+      # ==========================================
+      # TEST AWS
+      # ==========================================
+      - name: Test AWS credentials
+        run: |
+          set -e
+
+          echo "Testing AWS credentials..."
+
+          aws sts get-caller-identity
+
+          echo "AWS credentials are working."
+
+
+      # ==========================================
+      # LOGIN TO ECR
+      # ==========================================
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to Amazon ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+      # ==========================================
+      # CHECK DOCKER FILES
+      # ==========================================
+      - name: Check Docker build files
         run: |
           set -e
 
-          echo "Building Docker image..."
+          echo "======================================"
+          echo "Current directory"
+          echo "======================================"
 
-          docker build -t ${{ secrets.ECR_REPOSITORY }} .
+          pwd
 
-          echo "Tagging Docker image..."
+          echo "======================================"
+          echo "Repository files"
+          echo "======================================"
 
-          docker tag ${{ secrets.ECR_REPOSITORY }} \
-            $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+          ls -la
 
-          echo "Pushing Docker image to ECR..."
+          echo "======================================"
+          echo "Checking Dockerfile"
+          echo "======================================"
+
+          if [ ! -f Dockerfile ]; then
+            echo "ERROR: Dockerfile was not found."
+            exit 1
+          fi
+
+          echo "Dockerfile found."
+
+
+      # ==========================================
+      # BUILD DOCKER IMAGE
+      # ==========================================
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "BUILDING DOCKER IMAGE"
+          echo "======================================"
+
+          docker build \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            .
+
+          echo "Docker image built successfully."
+
+
+      # ==========================================
+      # PUSH DOCKER IMAGE TO ECR
+      # ==========================================
+      - name: Push Docker image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "PUSHING IMAGE TO ECR"
+          echo "======================================"
 
           docker push \
-            $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
           echo "Docker image pushed successfully."
 
+
+      # ==========================================
+      # DEPLOY TO EC2
+      # ==========================================
       - name: Deploy to EC2
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
         run: |
           set -e
 
-          echo "Connecting to EC2..."
+          echo "======================================"
+          echo "CONNECTING TO EC2"
+          echo "======================================"
 
           echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ec2_key
+
           chmod 600 /tmp/ec2_key
 
           trap 'rm -f /tmp/ec2_key' EXIT
 
+
+          # ======================================
+          # SSH INTO EC2
+          # ======================================
+
           ssh \
             -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
             -i /tmp/ec2_key \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "ECR_REGISTRY='$ECR_REGISTRY' ECR_REPOSITORY='$ECR_REPOSITORY' AWS_REGION='$AWS_REGION' CONTAINER_NAME='$CONTAINER_NAME' bash -s" << 'EOF'
 
             set -e
 
+            IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+
+            # ======================================
+            # ECR LOGIN
+            # ======================================
+
             echo "======================================"
-            echo "Logging into Amazon ECR"
+            echo "LOGGING INTO AMAZON ECR"
             echo "======================================"
 
             aws ecr get-login-password \
-              --region ${{ secrets.AWS_REGION }} | \
+              --region "$AWS_REGION" | \
               docker login \
               --username AWS \
-              --password-stdin $ECR_REGISTRY
+              --password-stdin "$ECR_REGISTRY"
+
+
+            # ======================================
+            # PULL IMAGE
+            # ======================================
 
             echo "======================================"
-            echo "Pulling Docker image"
+            echo "PULLING DOCKER IMAGE"
             echo "======================================"
 
-            docker pull \
-              $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+            echo "Image:"
+            echo "$IMAGE"
+
+            docker pull "$IMAGE"
+
+
+            # ======================================
+            # STOP OLD CONTAINER
+            # ======================================
 
             echo "======================================"
-            echo "Stopping existing container"
+            echo "STOPPING EXISTING CONTAINER"
             echo "======================================"
 
-            docker stop $CONTAINER_NAME || true
-            docker rm $CONTAINER_NAME || true
+            docker stop "$CONTAINER_NAME" || true
+
+            docker rm "$CONTAINER_NAME" || true
+
+
+            # ======================================
+            # START NEW CONTAINER
+            # ======================================
 
             echo "======================================"
-            echo "Starting new container"
+            echo "STARTING NEW CONTAINER"
             echo "======================================"
 
             docker run -d \
-              --name $CONTAINER_NAME \
+              --name "$CONTAINER_NAME" \
               --restart unless-stopped \
               -p 80:3000 \
-              $ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:latest
+              "$IMAGE"
+
+
+            # ======================================
+            # WAIT FOR APPLICATION
+            # ======================================
 
             echo "======================================"
-            echo "Container status"
+            echo "WAITING FOR APPLICATION"
             echo "======================================"
 
-            docker ps
+            sleep 5
+
+
+            # ======================================
+            # CONTAINER STATUS
+            # ======================================
 
             echo "======================================"
-            echo "Container logs"
+            echo "CONTAINER STATUS"
             echo "======================================"
 
-            docker logs $CONTAINER_NAME --tail 50
+            docker ps \
+              --filter "name=$CONTAINER_NAME"
+
+
+            # ======================================
+            # CHECK CONTAINER IS RUNNING
+            # ======================================
+
+            if ! docker ps \
+              --filter "name=$CONTAINER_NAME" \
+              --filter "status=running" \
+              --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
+
+              echo "======================================"
+              echo "CONTAINER FAILED TO START"
+              echo "======================================"
+
+              docker logs "$CONTAINER_NAME" --tail 100 || true
+
+              exit 1
+            fi
+
+
+            # ======================================
+            # CONTAINER LOGS
+            # ======================================
 
             echo "======================================"
-            echo "Cleaning old images"
+            echo "CONTAINER LOGS"
+            echo "======================================"
+
+            docker logs "$CONTAINER_NAME" --tail 50
+
+
+            # ======================================
+            # CLEAN OLD IMAGES
+            # ======================================
+
+            echo "======================================"
+            echo "CLEANING OLD DOCKER IMAGES"
             echo "======================================"
 
             docker image prune -f
+
+
+            # ======================================
+            # SUCCESS
+            # ======================================
 
             echo "======================================"
             echo "DEPLOYMENT SUCCESSFUL"
